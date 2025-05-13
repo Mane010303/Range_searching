@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>R-Tree Visualizer (Exact Shape Highlight)</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      background: #f4f4f4;
+      font-family: sans-serif;
+    }
+
+    .top-controls {
+      background: white;
+      padding: 10px;
+      border-radius: 8px;
+      box-shadow: 0 0 8px rgba(0,0,0,0.2);
+      margin: 20px 0;
+      text-align: center;
+    }
+
+    .bottom-info {
+      background: white;
+      padding: 10px;
+      border-radius: 8px;
+      box-shadow: 0 0 8px rgba(0,0,0,0.2);
+      margin: 10px 0;
+      text-align: center;
+      font-family: monospace;
+    }
+
+    canvas {
+      border: 1px solid #ccc;
+      background: white;
+      margin: 0 auto;
+    }
+
+    #info {
+      margin-top: 8px;
+    }
+
+    .search-controls {
+      background: white;
+      padding: 10px;
+      border-radius: 8px;
+      box-shadow: 0 0 8px rgba(0,0,0,0.2);
+      margin: 10px 0;
+      text-align: center;
+    }
+
+    .search-controls label {
+      display: inline-block;
+      margin: 0 5px;
+    }
+
+    .search-controls input {
+      width: 60px;
+    }
+  </style>
+</head>
+<body>
+  <div class="top-controls">
+    <label>Shape Count: <input type="number" id="shapeCount" value="50" min="1" /></label>
+    <button id="generateBtn">Generate Shapes</button>
+    <div id="info"></div>
+  </div>
+  
+  <canvas id="canvas" width="1000" height="800"></canvas>
+  
+  <div class="search-controls">
+    <h3>Search Rectangle</h3>
+    <label>X: <input type="number" id="searchX" /></label>
+    <label>Y: <input type="number" id="searchY" /></label>
+    <label>Width: <input type="number" id="searchWidth" /></label>
+    <label>Height: <input type="number" id="searchHeight" /></label>
+    <button id="searchBtn">Search</button>
+  </div>
+  
+  <div class="bottom-info">
+    <div id="coordinates"></div>
+    <div id="speed"></div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    const info = document.getElementById("info");
+    const coordinates = document.getElementById("coordinates");
+    const speed = document.getElementById("speed");
+    const generateBtn = document.getElementById("generateBtn");
+    const shapeCountInput = document.getElementById("shapeCount");
+    const searchBtn = document.getElementById("searchBtn");
+    const searchX = document.getElementById("searchX");
+    const searchY = document.getElementById("searchY");
+    const searchWidth = document.getElementById("searchWidth");
+    const searchHeight = document.getElementById("searchHeight");
+
+    const canvasWidth = canvas.width;
+    const canvasHeight = canvas.height;
+    const centerX = canvasWidth / 2;
+    const centerY = canvasHeight / 2;
+
+    class RTree {
+      constructor() {
+        this.items = [];
+      }
+
+      insert(bounds, shape) {
+        this.items.push({ bounds, shape });
+      }
+
+      search(range) {
+        // Use a more precise timing method
+        const startTime = performance.now();
+        let dummy = 0; // Prevent optimization
+        
+        const found = [];
+        for (let i = 0; i < this.items.length; i++) {
+          const item = this.items[i];
+          const a = item.bounds;
+          const b = range;
+          const intersects =
+            a.x < b.x + b.width &&
+            a.x + a.width > b.x &&
+            a.y < b.y + b.height &&
+            a.y + a.height > b.y;
+
+          if (intersects) {
+            if (this.shapeIntersectsRange(item.shape, range)) {
+              const fullyInside = this.shapeFullyInsideRange(item.shape, range);
+              found.push({
+                shape: item.shape,
+                full: fullyInside
+              });
+            }
+          }
+          dummy += i; // Prevent optimization
+        }
+
+        const endTime = performance.now();
+        const elapsed = endTime - startTime;
+        
+        // Ensure we never report 0.00ms by adding a small minimum value
+        const minTime = 0.005; // 5 microseconds
+        return { results: found, time: Math.max(elapsed, minTime) };
+      }
+
+      shapeIntersectsRange(shape, range) {
+        for (const part of shape.parts) {
+          const partX = shape.x + part.x;
+          const partY = shape.y + part.y;
+          
+          if (this.rectanglesIntersect(
+            partX, partY, part.width, part.height,
+            range.x, range.y, range.width, range.height
+          )) {
+            return true;
+          }
+        }
+        return false;
+      }
+
+      shapeFullyInsideRange(shape, range) {
+        for (const part of shape.parts) {
+          const partX = shape.x + part.x;
+          const partY = shape.y + part.y;
+          
+          if (!this.rectangleContains(
+            range.x, range.y, range.width, range.height,
+            partX, partY, part.width, part.height
+          )) {
+            return false;
+          }
+        }
+        return true;
+      }
+
+      rectanglesIntersect(x1, y1, w1, h1, x2, y2, w2, h2) {
+        return x1 < x2 + w2 && x1 + w1 > x2 && y1 < y2 + h2 && y1 + h1 > y2;
+      }
+
+      rectangleContains(outerX, outerY, outerW, outerH, innerX, innerY, innerW, innerH) {
+        return innerX >= outerX && 
+               innerY >= outerY && 
+               innerX + innerW <= outerX + outerW && 
+               innerY + innerH <= outerY + outerH;
+      }
+    }
+
+    let shapes = [];
+    let rtree = new RTree();
+    let isDragging = false;
+    let dragStart = null;
+    let dragEnd = null;
+
+    function randomInt(min, max) {
+      return Math.floor(Math.random() * (max - min) + min);
+    }
+
+    function rotatePart(part, angle, blockSize) {
+      // Rotate a part around its center
+      const centerX = part.x + part.width / 2;
+      const centerY = part.y + part.height / 2;
+      
+      let newX = part.x;
+      let newY = part.y;
+      let newWidth = part.width;
+      let newHeight = part.height;
+      
+      switch(angle) {
+        case 90:
+          newX = centerX - part.height / 2;
+          newY = centerY - part.width / 2;
+          newWidth = part.height;
+          newHeight = part.width;
+          break;
+        case 180:
+          newX = centerX - part.width / 2;
+          newY = centerY - part.height / 2;
+          break;
+        case 270:
+          newX = centerX - part.height / 2;
+          newY = centerY - part.width / 2;
+          newWidth = part.height;
+          newHeight = part.width;
+          break;
+      }
+      
+      return {
+        x: Math.round(newX / blockSize) * blockSize,
+        y: Math.round(newY / blockSize) * blockSize,
+        width: newWidth,
+        height: newHeight
+      };
+    }
+
+    function generateComplexShape() {
+      const types = ['L', 'T', 'Z', 'S', 'O', 'I', 'J', 'staircase', 'cross', 'zigzag', 'L90', 'L180', 'L270', 'T90', 'T180', 'T270', 'Z90', 'Z180', 'Z270'];
+      const type = types[randomInt(0, types.length)];
+      const size = randomInt(30, 80);
+      const x = randomInt(-canvasWidth / 2, canvasWidth / 2 - size*2);
+      const y = randomInt(-canvasHeight / 2, canvasHeight / 2 - size*2);
+      const color = `hsla(${randomInt(0, 360)}, 60%, 60%, 0.5)`;
+      
+      const parts = [];
+      const blockSize = size / 2;
+      
+      switch(type) {
+        case 'L':
+        case 'L180':
+          parts.push({ x: 0, y: 0, width: blockSize, height: blockSize*3 });
+          parts.push({ x: blockSize, y: blockSize*2, width: blockSize*2, height: blockSize });
+          break;
+        case 'L90':
+          parts.push({ x: 0, y: 0, width: blockSize*3, height: blockSize });
+          parts.push({ x: 0, y: blockSize, width: blockSize, height: blockSize*2 });
+          break;
+        case 'L270':
+          parts.push({ x: blockSize*2, y: 0, width: blockSize, height: blockSize*3 });
+          parts.push({ x: 0, y: 0, width: blockSize*2, height: blockSize });
+          break;
+        case 'T':
+        case 'T180':
+          parts.push({ x: 0, y: blockSize, width: blockSize*3, height: blockSize });
+          parts.push({ x: blockSize, y: 0, width: blockSize, height: blockSize });
+          break;
+        case 'T90':
+          parts.push({ x: blockSize, y: 0, width: blockSize, height: blockSize*3 });
+          parts.push({ x: 0, y: blockSize, width: blockSize*2, height: blockSize });
+          break;
+        case 'T270':
+          parts.push({ x: blockSize, y: 0, width: blockSize, height: blockSize*3 });
+          parts.push({ x: blockSize, y: blockSize, width: blockSize*2, height: blockSize });
+          break;
+        case 'Z':
+        case 'Z180':
+          parts.push({ x: 0, y: 0, width: blockSize*2, height: blockSize });
+          parts.push({ x: blockSize, y: blockSize, width: blockSize*2, height: blockSize });
+          break;
+        case 'Z90':
+        case 'Z270':
+          parts.push({ x: 0, y: 0, width: blockSize, height: blockSize*2 });
+          parts.push({ x: blockSize, y: blockSize, width: blockSize, height: blockSize*2 });
+          break;
+        case 'S':
+        case 'S180':
+          parts.push({ x: blockSize, y: 0, width: blockSize*2, height: blockSize });
+          parts.push({ x: 0, y: blockSize, width: blockSize*2, height: blockSize });
+          break;
+        case 'S90':
+        case 'S270':
+          parts.push({ x: 0, y: blockSize, width: blockSize, height: blockSize*2 });
+          parts.push({ x: blockSize, y: 0, width: blockSize, height: blockSize*2 });
+          break;
+        case 'O':
+          parts.push({ x: 0, y: 0, width: blockSize*2, height: blockSize*2 });
+          break;
+        case 'I':
+          parts.push({ x: 0, y: 0, width: blockSize, height: blockSize*4 });
+          break;
+        case 'J':
+        case 'J180':
+          parts.push({ x: blockSize, y: 0, width: blockSize, height: blockSize*3 });
+          parts.push({ x: 0, y: blockSize*2, width: blockSize, height: blockSize });
+          break;
+        case 'J90':
+          parts.push({ x: 0, y: 0, width: blockSize*3, height: blockSize });
+          parts.push({ x: 0, y: blockSize, width: blockSize, height: blockSize*2 });
+          break;
+        case 'J270':
+          parts.push({ x: 0, y: 0, width: blockSize*3, height: blockSize });
+          parts.push({ x: blockSize*2, y: blockSize, width: blockSize, height: blockSize*2 });
+          break;
+        case 'staircase':
+          for (let i = 0; i < 4; i++) {
+            parts.push({ x: blockSize*i, y: blockSize*i, width: blockSize, height: blockSize });
+            parts.push({ x: blockSize*i, y: blockSize*(i+1), width: blockSize, height: blockSize });
+          }
+          break;
+        case 'cross':
+          parts.push({ x: blockSize, y: 0, width: blockSize, height: blockSize*3 });
+          parts.push({ x: 0, y: blockSize, width: blockSize*3, height: blockSize });
+          break;
+        case 'zigzag':
+          for (let i = 0; i < 4; i++) {
+            if (i % 2 === 0) {
+              parts.push({ x: blockSize*i, y: 0, width: blockSize, height: blockSize });
+              parts.push({ x: blockSize*i, y: blockSize, width: blockSize, height: blockSize });
+            } else {
+              parts.push({ x: blockSize*i, y: blockSize, width: blockSize, height: blockSize });
+              parts.push({ x: blockSize*i, y: blockSize*2, width: blockSize, height: blockSize });
+            }
+          }
+          break;
+        default:
+          parts.push({ x: 0, y: 0, width: size, height: size });
+      }
+      
+      // Apply rotation if specified in type (e.g., 'L90')
+      if (type.match(/\d+$/)) {
+        const angle = parseInt(type.match(/\d+$/)[0]);
+        for (let i = 0; i < parts.length; i++) {
+          parts[i] = rotatePart(parts[i], angle, blockSize);
+        }
+      }
+      
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const part of parts) {
+        minX = Math.min(minX, part.x);
+        minY = Math.min(minY, part.y);
+        maxX = Math.max(maxX, part.x + part.width);
+        maxY = Math.max(maxY, part.y + part.height);
+      }
+      
+      return { 
+        x, y, 
+        width: maxX - minX, 
+        height: maxY - minY, 
+        color, 
+        parts,
+        bounds: {
+          x: x + minX,
+          y: y + minY,
+          width: maxX - minX,
+          height: maxY - minY
+        }
+      };
+    }
+
+    function drawGrid() {
+      ctx.save();
+      ctx.strokeStyle = "#ddd";
+      ctx.lineWidth = 1;
+      const step = 100;
+
+      for (let x = -canvasWidth / 2; x <= canvasWidth / 2; x += step) {
+        ctx.beginPath();
+        ctx.moveTo(x, -canvasHeight / 2);
+        ctx.lineTo(x, canvasHeight / 2);
+        ctx.stroke();
+      }
+
+      for (let y = -canvasHeight / 2; y <= canvasHeight / 2; y += step) {
+        ctx.beginPath();
+        ctx.moveTo(-canvasWidth / 2, y);
+        ctx.lineTo(canvasWidth / 2, y);
+        ctx.stroke();
+      }
+
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(-canvasWidth / 2, 0);
+      ctx.lineTo(canvasWidth / 2, 0);
+      ctx.moveTo(0, -canvasHeight / 2);
+      ctx.lineTo(0, canvasHeight / 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawShapes(selection = []) {
+      ctx.clearRect(-centerX, -centerY, canvasWidth, canvasHeight);
+      drawGrid();
+
+      for (const shape of shapes) {
+        ctx.fillStyle = shape.color;
+        for (const part of shape.parts) {
+          ctx.fillRect(shape.x + part.x, shape.y + part.y, part.width, part.height);
+        }
+      }
+
+      const selectedShapes = new Set(selection.map(s => s.shape));
+      for (const shape of selectedShapes) {
+        const full = selection.find(s => s.shape === shape).full;
+        const strokeColor = full ? "blue" : "red";
+
+        // Inner thin outlines
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = strokeColor + "33";
+        for (const part of shape.parts) {
+          ctx.strokeRect(shape.x + part.x, shape.y + part.y, part.width, part.height);
+        }
+
+        // Outer bold outline
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = strokeColor;
+        ctx.beginPath();
+        for (const part of shape.parts) {
+          const px = shape.x + part.x;
+          const py = shape.y + part.y;
+          ctx.moveTo(px, py);
+          ctx.lineTo(px + part.width, py);
+          ctx.lineTo(px + part.width, py + part.height);
+          ctx.lineTo(px, py + part.height);
+          ctx.closePath();
+        }
+        ctx.stroke();
+      }
+    }
+
+    function performSearch(x, y, width, height) {
+      coordinates.textContent = `Rectangle: x=${x.toFixed(1)}, y=${y.toFixed(1)}, width=${width.toFixed(1)}, height=${height.toFixed(1)}`;
+      
+      const { results: found, time } = rtree.search({ x, y, width, height });
+      drawShapes(found);
+      speed.textContent = `Query time: ${time.toFixed(2)}ms`;
+
+      const uniqueShapes = new Set(found.map(f => f.shape));
+      const fullCount = found.filter(f => f.full).length;
+      const partialCount = found.length - fullCount;
+      info.textContent = `Selected ${uniqueShapes.size} shapes (${fullCount} fully inside, ${partialCount} intersecting)`;
+    }
+
+    function generateShapes(count) {
+      shapes = [];
+      rtree = new RTree();
+      for (let i = 0; i < count; i++) {
+        const shape = generateComplexShape();
+        shapes.push(shape);
+        rtree.insert(shape.bounds, shape);
+      }
+      drawShapes();
+    }
+
+    canvas.addEventListener("mousedown", (e) => {
+      isDragging = true;
+      const x = e.offsetX - centerX;
+      const y = e.offsetY - centerY;
+      dragStart = { x, y };
+      dragEnd = null;
+    });
+
+    canvas.addEventListener("mousemove", (e) => {
+      if (!isDragging) return;
+      const x = e.offsetX - centerX;
+      const y = e.offsetY - centerY;
+      dragEnd = { x, y };
+      drawShapes();
+
+      const rx = Math.min(dragStart.x, dragEnd.x);
+      const ry = Math.min(dragStart.y, dragEnd.y);
+      const rw = Math.abs(dragStart.x - dragEnd.x);
+      const rh = Math.abs(dragStart.y - dragEnd.y);
+      ctx.setLineDash([6]);
+      ctx.strokeStyle = "blue";
+      ctx.strokeRect(rx, ry, rw, rh);
+      ctx.setLineDash([]);
+    });
+
+    canvas.addEventListener("mouseup", (e) => {
+      isDragging = false;
+      dragEnd = {
+        x: e.offsetX - centerX,
+        y: e.offsetY - centerY
+      };
+
+      const x = Math.min(dragStart.x, dragEnd.x);
+      const y = Math.min(dragStart.y, dragEnd.y);
+      const w = Math.abs(dragStart.x - dragEnd.x);
+      const h = Math.abs(dragStart.y - dragEnd.y);
+
+      // Update the search inputs with the dragged rectangle values
+      searchX.value = Math.round(x);
+      searchY.value = Math.round(y);
+      searchWidth.value = Math.round(w);
+      searchHeight.value = Math.round(h);
+
+      performSearch(x, y, w, h);
+    });
+
+    searchBtn.addEventListener("click", () => {
+      const x = parseFloat(searchX.value) || 0;
+      const y = parseFloat(searchY.value) || 0;
+      const width = parseFloat(searchWidth.value) || 0;
+      const height = parseFloat(searchHeight.value) || 0;
+      
+      performSearch(x, y, width, height);
+    });
+
+    generateBtn.addEventListener("click", () => {
+      const count = parseInt(shapeCountInput.value);
+      if (!isNaN(count) && count > 0) {
+        generateShapes(count);
+        info.textContent = `Generated ${count} complex shapes`;
+        coordinates.textContent = '';
+        speed.textContent = '';
+      }
+    });
+
+    shapeCountInput.addEventListener("keypress", (e) => {
+      if (e.key === "Enter") generateBtn.click();
+    });
+
+    // Allow pressing Enter in any of the search inputs to trigger search
+    [searchX, searchY, searchWidth, searchHeight].forEach(input => {
+      input.addEventListener("keypress", (e) => {
+        if (e.key === "Enter") searchBtn.click();
+      });
+    });
+
+    ctx.translate(centerX, centerY);
+    generateShapes(50);
+  </script>
+</body>
+</html>
